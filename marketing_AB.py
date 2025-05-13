@@ -150,61 +150,110 @@ print("Cohen's h值: ",cohens_h)     #Cohen's h值:  0.05337501649888809
 
 
 #%% 对广告曝光量分析，（1）看广告量与转化是否有关联 （2）统计分析和可视化
-#%%% （1）对total ads分箱，比较每一段的转化率
-data.groupby('test group')['total ads'].describe()
+#%%% 画个boxplot，看下转化与否相对应的广告量分布
+import seaborn as sns
+plt.figure(figsize=(8,6))
 
-data['ads_bin'] = pd.cut(data['total ads'], bins=[0, 50, 100, 150, 200])
-ads_conversion = data.groupby('ads_bin')['converted'].mean()
+sns.boxplot(data=ads, x='converted', y='total ads')
+#converted的用户所观看的广告量的中位数明显高于未转化用户，而且它的四分位距也比未转化的宽，说用户所观看的广告量会影响转化率。
+ads.groupby('converted')['total ads'].describe()
+
+#%%% 做个点二列相关分析 （一个连续变量，一个二分类变量）
+from scipy.stats import pointbiserialr
+r, p_val = pointbiserialr(ads['converted'], ads['total ads'])
+
+print('相关系数：', r)   #约等于0.26
+print('p值：', p_val)    #小于0.01
+# 显著的弱正相关性
+
+#%%% 找出最佳广告观看量，只对处理组ads组操作
+#（1）对total ads分箱，比较每一段的转化率
+ads['total ads'].describe()
+#等宽分箱
+ads['bin'] = pd.cut(ads['total ads'], bins=range(0, 201, 10), right=True)
+conversion_by_bin = ads.groupby('bin')['converted'].agg(
+    count='count', converted='sum', conversion_rate='mean'
+).reset_index()
+
+plt.figure(figsize=(12,6))
+plt.plot(conversion_by_bin['bin'].astype(str), conversion_by_bin['conversion_rate'], marker='o')
+plt.xticks(rotation=45)
+plt.xlabel('ads interval')
+plt.ylabel('conversion rate')
+plt.title('num of ads vs conversion rate')
+plt.grid(True)
 
 
-df["ads_bin"] = pd.cut(df["total ads"], bins=[0, 10, 20, 30, 50, 100, 200, 500, 1000, 2500])
-df.groupby("ads_bin")["converted"].mean()
 
+#等频分箱
+ads['bin'] = pd.qcut(ads['total ads'], q=10, duplicates='drop')
+conversion_by_bin = ads.groupby('bin')['converted'].agg(
+    count='count', converted='sum', conversion_rate='mean'
+).reset_index()
 
+plt.figure(figsize=(12,6))
+plt.plot(conversion_by_bin['bin'].astype(str), conversion_by_bin['conversion_rate'], marker='o')
+plt.xticks(rotation=45)
+plt.xlabel('ads interval')
+plt.ylabel('conversion rate')
+plt.title('num of ads vs conversion rate')
+plt.grid(True)
+#最后一箱 (53.0, 200.0] 虽然转化率很高，但这部分人已经是 “极端高曝光”用户，可能有其他因素（如对产品本身感兴趣、定向广告投放更精准）在影响转化。
+max_row = conversion_by_bin.loc[conversion_by_bin['conversion_rate'].idxmax()]
+print("转化率最高的广告区间：", max_row['bin'])
+print("该区间转化率：{:.2%}".format(max_row['conversion_rate']))
 
+#%%% 逻辑回归，加入二次项来捕捉非线性关系，也可以先拟合一下加入二次项和不加二次项的回归模型来检验是否有必要
+#一元一次
 import statsmodels.api as sm
 
-# 自变量 + 常数项
-X = sm.add_constant(data["total ads"])
-y = data["converted"]
+X = ads[['total ads']]
+X = sm.add_constant(X)
+y = ads['converted']
+model = sm.Logit(y, X).fit()
+print(model.summary())
 
-# Logistic 回归
-model = sm.Logit(y, X)
-result = model.fit()
-
-# 回归结果
-print(result.summary())
-
-
-
+#加入平方项
+X = ads[['total ads']]
+X['ads_squared'] = X['total ads'] ** 2
+X = sm.add_constant(X)
+y = ads['converted']
+model = sm.Logit(y, X).fit()
+print(model.summary())
+#模型伪R方约等于0.2，拟合效果好，total_ads和ads_squared的p值都小于0.001，平方项的系数值很小，但是乘上 ads² 后仍可能有实质性的非线性影响。
 
 
 from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-import numpy as np
 
-# 复制干净的数据防止污染原始变量
-df_model = data.copy()
+X = ads[['total ads']]
+X['ads_squared'] = X['total ads'] ** 2
+y = ads['converted']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# 编码 test group（psa=0，ad=1）
-df_model['group_code'] = df_model['test group'].map({'psa': 0, 'ad': 1})
+model = LogisticRegression()
+model.fit(X_train, y_train)
 
-# 创建交互项
-df_model['ads_x_group'] = df_model['total ads'] * df_model['group_code']
 
-# 特征变量和目标变量
-X = df_model[['total ads', 'group_code', 'ads_x_group']]
-y = df_model['converted']
 
-# 拟合模型
-log_reg = LogisticRegression()
-log_reg.fit(X, y)
 
-# 系数与解释
-feature_names = X.columns
-for name, coef in zip(feature_names, log_reg.coef_[0]):
-    print(f"{name}: {coef:.4f}")
+ads_range = np.arange(1, 201)
+ads_squared = ads_range ** 2
+
+# 组装为模型需要的输入形式
+X_pred = sm.add_constant(pd.DataFrame({
+    'total ads': ads_range,
+    'ads_squared': ads_squared
+}))
+
+# 预测概率
+pred_probs = model.predict(X_pred)
+
+# 找到最大概率的位置
+best_ads = ads_range[np.argmax(pred_probs)]
+best_prob = np.max(pred_probs)
+
+print(f"转化率最高出现在广告数 = {best_ads}，其预测转化率为：{best_prob:.4f}")
 
 
 
